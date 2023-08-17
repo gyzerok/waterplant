@@ -196,6 +196,7 @@ dependencies = [
  "cfg-if",
  "critical-section",
  "embedded-hal 0.2.7",
+ "embedded-hal 1.0.0-alpha.11",
  "embedded-hal-async",
  "futures-util",
  "heapless",
@@ -768,6 +769,9 @@ version = "0.1.0"
 dependencies = [
  "embassy-executor",
  "embassy-time",
+ "embedded-hal 0.2.7",
+ "embedded-hal 1.0.0-alpha.11",
+ "embedded-hal-async",
  "esp-backtrace",
  "esp-println",
  "esp32c3-hal",

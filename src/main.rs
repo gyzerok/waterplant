@@ -3,13 +3,21 @@
 #![feature(type_alias_impl_trait)]
 
 use embassy_executor::Executor;
-use embassy_time::{Duration, Timer};
+use embassy_time::{Delay, Duration, Timer};
 use esp_backtrace as _;
 use esp_println::println;
 use hal::{
-    clock::ClockControl, embassy, peripherals::Peripherals, prelude::*, timer::TimerGroup, Rtc,
+    clock::ClockControl,
+    embassy,
+    i2c::I2C,
+    interrupt,
+    peripherals::{Interrupt, Peripherals, I2C0},
+    prelude::*,
+    timer::TimerGroup,
+    Rtc, IO,
 };
 use static_cell::StaticCell;
+use waterplant::lcd_i2c::Lcd;
 
 static EXECUTOR: StaticCell<Executor> = StaticCell::new();
 
@@ -45,15 +53,33 @@ fn main() -> ! {
         hal::systimer::SystemTimer::new(peripherals.SYSTIMER),
     );
 
+    let io = IO::new(peripherals.GPIO, peripherals.IO_MUX);
+
+    // let i2c = I2C::new_async(p.I2C1, scl, sda, Irqs, Config::default());
+    // let i2c = I2C::new_async();
+    let i2c0 = I2C::new(
+        peripherals.I2C0,
+        io.pins.gpio4,
+        io.pins.gpio5,
+        400u32.kHz(),
+        &mut system.peripheral_clock_control,
+        &clocks,
+    );
+
+    interrupt::enable(Interrupt::I2C_EXT0, interrupt::Priority::Priority1).unwrap();
+
     let executor = EXECUTOR.init(Executor::new());
     executor.run(|spawner| {
-        spawner.spawn(run1()).ok();
-        spawner.spawn(run2()).ok();
+        spawner.spawn(run_lcd(i2c0)).ok();
     });
 }
 
 #[embassy_executor::task]
-async fn run1() {
+async fn run_lcd(i2c: I2C<'static, I2C0>) {
+    let mut lcd1602 = Lcd::new(i2c, Delay).with_2rows().enable().await.unwrap();
+
+    lcd1602.write_str("Hello, world!").await.unwrap();
+
     loop {
         esp_println::println!("Hello world from embassy using esp-hal-async!");
         Timer::after(Duration::from_millis(1_000)).await;
