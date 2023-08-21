@@ -4,29 +4,39 @@
 
 use embassy_executor::Executor;
 use embassy_time::{Delay, Duration, Timer};
+use embedded_svc::wifi::{ClientConfiguration, Configuration, Wifi};
 use esp_backtrace as _;
 use esp_println::println;
+use esp_wifi::{
+    self,
+    wifi::{WifiController, WifiDevice, WifiEvent, WifiMode, WifiState},
+};
 use hal::{
-    clock::ClockControl,
+    clock::{ClockControl, CpuClock},
     embassy,
     i2c::I2C,
     interrupt,
     peripherals::{Interrupt, Peripherals, I2C0},
     prelude::*,
+    systimer::SystemTimer,
     timer::TimerGroup,
-    Rtc, IO,
+    Rng, Rtc, IO,
 };
 use static_cell::StaticCell;
 use waterplant::lcd_i2c::Lcd;
 
 static EXECUTOR: StaticCell<Executor> = StaticCell::new();
 
+const SSID: &str = env!("WIFI_SSID");
+const PASSWORD: &str = env!("WIFI_PASS");
+
 #[entry]
 fn main() -> ! {
     esp_println::println!("Init!");
     let peripherals = Peripherals::take();
     let mut system = peripherals.SYSTEM.split();
-    let clocks = ClockControl::boot_defaults(system.clock_control).freeze();
+    // let clocks = ClockControl::boot_defaults(system.clock_control).freeze();
+    let clocks = ClockControl::configure(system.clock_control, CpuClock::Clock160MHz).freeze();
 
     let mut rtc = Rtc::new(peripherals.RTC_CNTL);
     let timer_group0 = TimerGroup::new(
@@ -48,15 +58,12 @@ fn main() -> ! {
     wdt0.disable();
     wdt1.disable();
 
-    embassy::init(
-        &clocks,
-        hal::systimer::SystemTimer::new(peripherals.SYSTIMER),
-    );
+    embassy::init(&clocks, timer_group0.timer0);
 
     let io = IO::new(peripherals.GPIO, peripherals.IO_MUX);
 
-    // let i2c = I2C::new_async(p.I2C1, scl, sda, Irqs, Config::default());
-    // let i2c = I2C::new_async();
+    // I2C SETUP
+
     let i2c0 = I2C::new(
         peripherals.I2C0,
         io.pins.gpio4,
@@ -68,9 +75,27 @@ fn main() -> ! {
 
     interrupt::enable(Interrupt::I2C_EXT0, interrupt::Priority::Priority1).unwrap();
 
+    // WIFI SETUP
+
+    let init = esp_wifi::initialize(
+        esp_wifi::EspWifiInitFor::Wifi,
+        SystemTimer::new(peripherals.SYSTIMER).alarm0,
+        Rng::new(peripherals.RNG),
+        system.radio_clock_control,
+        &clocks,
+    )
+    .unwrap();
+
+    let (wifi_dev, _) = peripherals.RADIO.split();
+    let (wifi_interface, controller) =
+        esp_wifi::wifi::new_with_mode(&init, wifi_dev, WifiMode::Sta).unwrap();
+
+    // STARTING TASKS
+
     let executor = EXECUTOR.init(Executor::new());
     executor.run(|spawner| {
-        spawner.spawn(run_lcd(i2c0)).ok();
+        // spawner.spawn(run_lcd(i2c0)).ok();
+        spawner.spawn(connect_wifi(controller)).ok();
     });
 }
 
@@ -79,7 +104,10 @@ async fn run_lcd(i2c: I2C<'static, I2C0>) {
     let mut lcd1602 = Lcd::new(i2c, Delay).with_2rows().enable().await.unwrap();
 
     lcd1602.write_str("Hello, world!").await.unwrap();
+}
 
+#[embassy_executor::task]
+async fn run_pwm() {
     loop {
         esp_println::println!("Hello world from embassy using esp-hal-async!");
         Timer::after(Duration::from_millis(1_000)).await;
@@ -87,57 +115,37 @@ async fn run_lcd(i2c: I2C<'static, I2C0>) {
 }
 
 #[embassy_executor::task]
-async fn run2() {
+async fn connect_wifi(mut controller: WifiController<'static>) {
+    println!("start connection task");
+    println!("Device capabilities: {:?}", controller.get_capabilities());
     loop {
-        esp_println::println!("Bing!");
-        Timer::after(Duration::from_millis(5_000)).await;
+        match esp_wifi::wifi::get_wifi_state() {
+            WifiState::StaConnected => {
+                // wait until we're no longer connected
+                controller.wait_for_event(WifiEvent::StaDisconnected).await;
+                Timer::after(Duration::from_millis(5000)).await
+            }
+            _ => {}
+        }
+        if !matches!(controller.is_started(), Ok(true)) {
+            let client_config = Configuration::Client(ClientConfiguration {
+                ssid: SSID.into(),
+                password: PASSWORD.into(),
+                ..Default::default()
+            });
+            controller.set_configuration(&client_config).unwrap();
+            println!("Starting wifi");
+            controller.start().await.unwrap();
+            println!("Wifi started!");
+        }
+        println!("About to connect...");
+
+        match controller.connect().await {
+            Ok(_) => println!("Wifi connected!"),
+            Err(e) => {
+                println!("Failed to connect to wifi: {e:?}");
+                Timer::after(Duration::from_millis(5000)).await
+            }
+        }
     }
 }
-
-// #![no_std]
-// #![no_main]
-// #![feature(type_alias_impl_trait)]
-
-// use core::fmt::Write;
-// use core::write;
-
-// use embassy_executor::Spawner;
-// use embassy_rp::bind_interrupts;
-// use embassy_rp::i2c::{self, Config, InterruptHandler};
-// use embassy_rp::peripherals::I2C1;
-// use embassy_time::{Delay, Duration, Timer};
-// use fntest::lcd_i2c::Lcd;
-// use heapless::String;
-// use {defmt, defmt_rtt as _, panic_probe as _};
-
-// bind_interrupts!(struct Irqs {
-//     I2C1_IRQ => InterruptHandler<I2C1>;
-// });
-
-// #[embassy_executor::main]
-// async fn main(_spawner: Spawner) {
-//     let p = embassy_rp::init(Default::default());
-
-//     let sda = p.PIN_14;
-//     let scl = p.PIN_15;
-
-//     let i2c = i2c::I2c::new_async(p.I2C1, scl, sda, Irqs, Config::default());
-//     let mut lcd1602 = Lcd::new(i2c, Delay).with_2rows().enable().await.unwrap();
-
-//     lcd1602.write_str("Hello, world!").await.unwrap();
-
-//     lcd1602.move_cursor_to(1, 0).await.unwrap();
-
-//     let mut output: String<17> = String::new();
-//     write!(&mut output, "  {} {} {}", 12, 21.05, true).unwrap();
-//     lcd1602.write_str(&output).await.unwrap();
-
-//     let dick = lcd1602
-//         .register_custom_char(0, &[0x04, 0x0A, 0x0E, 0x0A, 0x0A, 0x0A, 0x15, 0x1B])
-//         .await
-//         .unwrap();
-//     lcd1602.move_cursor_to(1, 0).await.unwrap();
-//     lcd1602.write_u8(dick).await.unwrap();
-
-//     Timer::after(Duration::from_secs(10)).await;
-// }
