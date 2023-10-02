@@ -12,8 +12,10 @@ use esp_wifi::{
     wifi::{WifiController, WifiDevice, WifiEvent, WifiMode, WifiState},
 };
 use hal::{
+    adc::{AdcConfig, AdcPin, Attenuation, ADC, ADC1},
     clock::{ClockControl, CpuClock},
     embassy,
+    gpio::{Analog, GpioPin},
     i2c::I2C,
     interrupt,
     peripherals::{Interrupt, Peripherals, I2C0},
@@ -27,8 +29,8 @@ use waterplant::lcd_i2c::Lcd;
 
 static EXECUTOR: StaticCell<Executor> = StaticCell::new();
 
-const SSID: &str = env!("WIFI_SSID");
-const PASSWORD: &str = env!("WIFI_PASS");
+// const SSID: &str = env!("WIFI_SSID");
+// const PASSWORD: &str = env!("WIFI_PASS");
 
 #[entry]
 fn main() -> ! {
@@ -62,7 +64,19 @@ fn main() -> ! {
 
     let io = IO::new(peripherals.GPIO, peripherals.IO_MUX);
 
-    // I2C SETUP
+    // ADC FOR SOIL MOISTURE SENSOR (SMS) SETUP
+
+    let mut adc1_config = AdcConfig::new();
+    let sms_pin = adc1_config.enable_pin(io.pins.gpio1.into_analog(), Attenuation::Attenuation11dB);
+    let analog = peripherals.APB_SARADC.split();
+    let sms = ADC::adc(
+        &mut system.peripheral_clock_control,
+        analog.adc1,
+        adc1_config,
+    )
+    .unwrap();
+
+    // I2C FOR LCD SETUP
 
     let i2c0 = I2C::new(
         peripherals.I2C0,
@@ -87,7 +101,7 @@ fn main() -> ! {
     .unwrap();
 
     let (wifi_dev, _) = peripherals.RADIO.split();
-    let (wifi_interface, controller) =
+    let (wifi_iface, controller) =
         esp_wifi::wifi::new_with_mode(&init, wifi_dev, WifiMode::Sta).unwrap();
 
     // STARTING TASKS
@@ -95,7 +109,8 @@ fn main() -> ! {
     let executor = EXECUTOR.init(Executor::new());
     executor.run(|spawner| {
         // spawner.spawn(run_lcd(i2c0)).ok();
-        spawner.spawn(connect_wifi(controller)).ok();
+        spawner.spawn(run_moisure_sensor(sms, sms_pin)).ok();
+        // spawner.spawn(connect_wifi(controller)).ok();
     });
 }
 
@@ -115,37 +130,50 @@ async fn run_pwm() {
 }
 
 #[embassy_executor::task]
-async fn connect_wifi(mut controller: WifiController<'static>) {
-    println!("start connection task");
-    println!("Device capabilities: {:?}", controller.get_capabilities());
+async fn run_moisure_sensor(
+    mut sms: ADC<'static, ADC1>,
+    mut sms_pin: AdcPin<GpioPin<Analog, 1>, ADC1>,
+) {
     loop {
-        match esp_wifi::wifi::get_wifi_state() {
-            WifiState::StaConnected => {
-                // wait until we're no longer connected
-                controller.wait_for_event(WifiEvent::StaDisconnected).await;
-                Timer::after(Duration::from_millis(5000)).await
-            }
-            _ => {}
-        }
-        if !matches!(controller.is_started(), Ok(true)) {
-            let client_config = Configuration::Client(ClientConfiguration {
-                ssid: SSID.into(),
-                password: PASSWORD.into(),
-                ..Default::default()
-            });
-            controller.set_configuration(&client_config).unwrap();
-            println!("Starting wifi");
-            controller.start().await.unwrap();
-            println!("Wifi started!");
-        }
-        println!("About to connect...");
-
-        match controller.connect().await {
-            Ok(_) => println!("Wifi connected!"),
-            Err(e) => {
-                println!("Failed to connect to wifi: {e:?}");
-                Timer::after(Duration::from_millis(5000)).await
-            }
-        }
+        let sample: u16 = nb::block!(sms.read(&mut sms_pin)).unwrap();
+        println!("Moisture level: {:?}", sample);
+        Timer::after(Duration::from_millis(2000)).await;
     }
 }
+
+// #[embassy_executor::task]
+// async fn connect_wifi(mut controller: WifiController<'static>) {
+//     println!("start connection task");
+//     println!("Device capabilities: {:?}", controller.get_capabilities());
+//     loop {
+//         match esp_wifi::wifi::get_wifi_state() {
+//             WifiState::StaConnected => {
+//                 // wait until we're no longer connected
+//                 controller.wait_for_event(WifiEvent::StaDisconnected).await;
+//                 Timer::after(Duration::from_millis(5000)).await
+//             }
+//             _ => {}
+//         }
+
+//         if !matches!(controller.is_started(), Ok(true)) {
+//             let client_config = Configuration::Client(ClientConfiguration {
+//                 ssid: SSID.into(),
+//                 password: PASSWORD.into(),
+//                 ..Default::default()
+//             });
+//             controller.set_configuration(&client_config).unwrap();
+//             println!("Starting wifi");
+//             controller.start().await.unwrap();
+//             println!("Wifi started!");
+//         }
+//         println!("About to connect...");
+
+//         match controller.connect().await {
+//             Ok(_) => println!("Wifi connected!"),
+//             Err(e) => {
+//                 println!("Failed to connect to wifi: {e:?}");
+//                 Timer::after(Duration::from_millis(5000)).await
+//             }
+//         }
+//     }
+// }
